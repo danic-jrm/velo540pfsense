@@ -1,0 +1,16 @@
+velo540pfsense
+Copyright (c) 2026, danic-jrm
+Licensed under BSD-2-Clause, see LICENSE.
+
+Third-party code
+
+The files under k*/e1000/ and k*/e1000.orig/ (except e1000_vc.c and
+e1000_vc.h) are the FreeBSD e1000/igb driver. They keep their original
+copyright notices and licences: Intel Corporation's BSD licence (see
+k*/e1000/LICENSE) and the FreeBSD BSD-2-Clause headers in each file.
+
+The prebuilt ichwd.ko is compiled from FreeBSD's unmodified sys/dev/ichwd
+(BSD-2-Clause, see the headers in that source).
+
+The VeloCloud register sequences were taken from the velo540openwrt project
+(GPL-2.0) as hardware facts; no code from that project is included.

@@ -187,5 +187,5 @@ module again.
 
 ## Licence
 
-BSD-2-Clause, see `LICENSE`. The FreeBSD e1000 sources keep their own
+BSD-2-Clause, see `LICENSE`. Third-party code is listed in `NOTICE`; the FreeBSD e1000 sources keep their own
 Intel/FreeBSD BSD licences.
