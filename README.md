@@ -69,6 +69,132 @@ release series and crash it. Do the upgrade in a new ZFS boot environment
 a failed boot falls back on its own, either through the watchdog or a panic
 reboot (set `debug.debugger_on_panic="0"`).
 
+## Serial console on COM2
+
+The EDGE520/540 console port is wired to COM2 (I/O 0x2F8, `ttyu1`), but
+pfSense and the Netgate installer use COM1. There is a second problem: the
+EDGE's coreboot firmware (`VELOCLOUD-EDGE-01.00.00.05`) lists no serial
+ports in its ACPI tables, and pfSense's `/boot/device.hints` attaches uarts
+only through ACPI (`hint.uart.N.at="acpi"`). So on a stock install **no uart
+attaches at all**: there is no `/dev/ttyu*`, and the kernel console goes to
+COM1 at a low level only.
+
+The fix is the same settings Netgate's installer uses for its own COM2
+boards (RCC-VE, SG-2220):
+
+```
+comconsole_port="0x2F8"
+hint.uart.0.at="isa"
+hint.uart.0.flags="0x00"
+hint.uart.1.at="isa"
+hint.uart.1.flags="0x10"
+```
+
+`comconsole_port` moves the loader's console, and the loader passes it on to
+the kernel as `hw.uart.console`. The `.at="isa"` hints attach both uarts
+from hints instead of ACPI. The `.flags` hints move the kernel's console flag
+from uart0 to uart1. `/etc/ttys` already runs a getty on `ttyu1` when it is
+the console.
+
+**Status:** the installed-system steps were tested on an EDGE540 rev 2.8
+running pfSense 2.9.0 (legacy BIOS boot). After a reboot, uart0 and uart1
+attach on isa0, `uart1: console (115200,n,8,1)` appears, `kern.console` is
+`ttyu1`, and boot output and the console menu run on `ttyu1`. The patched
+installer image has not been booted yet, and UEFI boot is untested.
+
+### An installed system
+
+1. As root, append the settings to `/boot/loader.conf.local`. pfSense never
+   rewrites that file:
+   ```sh
+   cat >> /boot/loader.conf.local <<'CONF'
+   comconsole_port="0x2F8"
+   hint.uart.0.at="isa"
+   hint.uart.0.flags="0x00"
+   hint.uart.1.at="isa"
+   hint.uart.1.flags="0x10"
+   CONF
+   ```
+2. In the GUI, go to *System > Advanced > Admin Access > Serial
+   Communications*. Tick *Serial Terminal*, set the speed to 115200 and the
+   primary console to *Serial Console*, then save. This writes `boot_serial`,
+   `console` and `comconsole_speed` to `/boot/loader.conf`.
+3. Reboot. Check with `kenv hw.uart.console` (should print
+   `io:760,br:115200`; 760 is 0x2F8) and `dmesg | grep uart`.
+
+Undo by deleting the five lines. SSH and the GUI work throughout.
+
+### The installer, and systems it installs
+
+`tools/patch-installer.sh` builds a VeloCloud installer from a stock Netgate
+installer image. It runs as root on FreeBSD, because it mounts the image's
+UFS root read-write (`mdconfig`, `mount`, `kldxref`, `fsck_ffs`):
+
+```sh
+sh tools/patch-installer.sh netgate-installer-v1.1.1-RELEASE-amd64.img \
+    netgate-installer-v1.1.1-RELEASE-amd64-velo540.img \
+    installer-1600004/ target-1600018/
+```
+
+`installer-1600004/` holds `vcigb.ko` built for the installer kernel
+(`k1600004`). `target-1600018/` holds `ichwd.ko` and `vcigb.ko` built for
+pfSense 2.9.0 (`k1600018`). All three are attached to the
+`v0.2.0-pfsense-2.9.0` release. The patched image itself is not
+distributed, because it is Netgate's work. Download the stock image from
+Netgate and build your own:
+
+```sh
+R=https://github.com/danic-jrm/velo540pfsense/releases/download/v0.2.0-pfsense-2.9.0
+mkdir installer-1600004 target-1600018
+fetch -o installer-1600004/vcigb.ko $R/vcigb-installer-1600004.ko
+fetch -o target-1600018/vcigb.ko $R/vcigb.ko
+fetch -o target-1600018/ichwd.ko $R/ichwd.ko
+fetch $R/SHA256SUMS
+sha256 installer-1600004/vcigb.ko target-1600018/*.ko   # compare with SHA256SUMS
+```
+
+The installer `vcigb.ko` passes the import check against the installer
+kernel `installer-RELENG_v1_1_1-n256503-329d700f627c`: 148 imports, all
+exported, and the module declares kernel 1600004.
+
+On a VeloCloud Edge, the patched installer:
+* boots with its console on COM2 (a VeloCloud block in `/boot/loader.conf.lua`
+  sets the five settings above);
+* loads `ichwd` (the installer kernel already ships `ichwd.ko`), so the
+  watchdog doesn't reboot it mid-install;
+* loads `vcigb` from `/boot/modules`, so all six ports can be used during
+  the install. Interfaces picked there keep their names on the installed
+  system.
+
+After installing, a hook in `pfSense-post-install` runs
+`/usr/local/share/velo540pfsense/post-install.sh` on the target. It:
+* turns the serial console on and appends the five settings to the target's
+  `/boot/loader.conf.local`;
+* copies `ichwd.ko` and `vcigb.ko` to the target's `/boot/modules`, runs
+  `kldxref` and adds `ichwd_load`/`vcigb_load`, **but only if the installed
+  kernel's ident is exactly** `RELENG_2_9_0-n256132-d8e3138ecf52`. If the
+  installer installed a different pfSense version, it prints a warning and
+  skips the modules (COM2 still applies). Rebuild them for that kernel and
+  install them by hand as in [Installing](#installing-pfsense-290).
+
+On other hardware the patched image behaves like the stock one.
+
+The script stops without leaving an image behind if the image is already
+patched, an anchor line is missing, the installer kernel's ident isn't the
+expected one, or `fsck_ffs` finds errors. For other kernels, set
+`INSTALLER_IDENT` and `TARGET_IDENT`.
+
+**Checked so far** (on a FreeBSD 16 host, against
+`netgate-installer-v1.1.1-RELEASE-amd64.img`):
+* `fsck_ffs -fn` on the result is clean.
+* The Lua block, run with `flua` in a loader-like environment, sets all
+  eleven values for a VeloCloud maker and nothing for other makers.
+* `post-install.sh`, run with a stubbed `kenv` against dummy target roots,
+  installs the modules when the kernel ident matches. It warns and skips them
+  for a different ident, and exits untouched on other hardware.
+
+The patched image has not been booted on an EDGE yet.
+
 ## What the driver does on attach
 
 * **Funcs 0/1:** no PHY probe. Media is internal SerDes and the PCS is forced
@@ -125,6 +251,9 @@ Other files:
 * `tools/cmplayout.py`: compares those layouts with the build headers.
 * `tools/chkimports.py`: checks a module's imports against a kernel and prints
   its declared kernel version.
+* `tools/patch-installer.sh`: builds a VeloCloud Netgate installer image
+  (COM2 console, `ichwd`, `vcigb`; see
+  [Serial console on COM2](#serial-console-on-com2)). Runs on FreeBSD.
 
 ## How the modules are checked against a kernel
 
